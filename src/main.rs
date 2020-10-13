@@ -79,7 +79,7 @@ fn watch_device(device_path: &str, mut output: mpsc::Sender<KeyEvent>) {
     });
 }
 
-const KEY_DURATION: Duration = Duration::from_millis(200);
+const KEY_DURATION: Duration = Duration::from_millis(500);
 
 enum Side {
     Left,
@@ -160,6 +160,9 @@ impl Iterator for Mixer {
                 to_remove.push(i);
             }
         }
+        if !self.tracks.is_empty() {
+            ret /= self.tracks.len() as f32;
+        }
         for i in to_remove.into_iter().rev() {
             self.tracks.remove(i);
         }
@@ -172,7 +175,7 @@ impl Source for Mixer {
         self.sample_rate
     }
     fn channels(&self) -> u16 {
-        2
+        1
     }
     fn current_frame_len(&self) -> Option<usize> {
         None
@@ -182,6 +185,7 @@ impl Source for Mixer {
     }
 }
 
+const MAX_SAMPLE: usize = 200;
 async fn handle_events(mut input: mpsc::Receiver<KeyEvent>) {
     let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
     let silence = rodio::source::Zero::<f32>::new(1, 48 * 1024);
@@ -189,11 +193,23 @@ async fn handle_events(mut input: mpsc::Receiver<KeyEvent>) {
     let (mut mix_tx, mix_rx) = mpsc::channel(50);
     let sample_rate = 48 * 1024;
     let recalculation_rate = 1024;
-    let sounds = vec![rodio::source::SineWave::new(440)
-        .take_crossfade_with(silence.clone(), KEY_DURATION)
-        .amplify(0.2)
-        .take(KEY_DURATION.as_millis() as usize * sample_rate / 1000)
-        .collect()];
+    let sounds = (0..MAX_SAMPLE)
+        .map(|i| {
+            rodio::source::SineWave::new(100 + 10 * i as u32)
+                .take_crossfade_with(silence.clone(), KEY_DURATION)
+                .amplify(0.2)
+                .take(KEY_DURATION.as_millis() as usize * sample_rate / 1000)
+                .collect()
+        })
+        .collect::<Vec<Vec<_>>>();
+    let sounds = [
+        sounds.clone(),
+        sounds
+            .into_iter()
+            .map(|v| v.into_iter().rev().collect())
+            .collect(),
+    ]
+    .concat();
     let mixer = Mixer::new(mix_rx, sample_rate as u32, recalculation_rate, sounds);
 
     stream_handle
@@ -202,15 +218,23 @@ async fn handle_events(mut input: mpsc::Receiver<KeyEvent>) {
 
     while let Some(event) = input.recv().await {
         println!("Received event {:?}", event);
-        if let Err(e) = mix_tx
-            .send(FullMixerCommand {
-                cmd: MixerCommand::Ting {
-                    track_id: 0,
-                    side: Side::Middle,
-                },
-            })
-            .await
-        {
+        let track_id = event.code as usize % MAX_SAMPLE;
+        let cmd = match event.value {
+            KeyState::Up => MixerCommand::Ting {
+                track_id,
+                side: Side::Middle,
+            },
+            KeyState::Repeat => MixerCommand::Ting {
+                track_id,
+                side: Side::Middle,
+            },
+            KeyState::Down => MixerCommand::Ting {
+                track_id: track_id + MAX_SAMPLE,
+                side: Side::Middle,
+            },
+            _ => continue,
+        };
+        if let Err(e) = mix_tx.send(FullMixerCommand { cmd }).await {
             eprintln!("Error: {}", e);
         }
     }
