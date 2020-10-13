@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 input-linux = "0"
+rodio = "0"
 
 [dependencies.tokio]
 version = "0.2"
