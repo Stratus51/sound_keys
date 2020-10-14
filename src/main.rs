@@ -6,6 +6,9 @@ use std::iter::Iterator;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+mod mixer;
+mod source;
+
 const EMPTY_EVENT: input_linux::sys::input_event = input_linux::sys::input_event {
     time: input_linux::sys::timeval {
         tv_sec: 0,
@@ -81,161 +84,149 @@ fn watch_device(device_path: &str, mut output: mpsc::Sender<KeyEvent>) {
 
 const KEY_DURATION: Duration = Duration::from_millis(500);
 
-enum Side {
-    Left,
-    Right,
-    Middle,
-}
-
-enum MixerCommand {
-    Ting { track_id: usize, side: Side },
-}
-struct FullMixerCommand {
-    cmd: MixerCommand,
-}
-
-struct TrackIndex {
-    track_id: usize,
-    cursor: i32,
-}
-
-struct Mixer {
-    cmd_input: mpsc::Receiver<FullMixerCommand>,
-    sample_rate: u32,
-    recalculation_rate: u32,
-    sounds: Vec<Vec<f32>>,
-    tracks: Vec<TrackIndex>,
-    until_recalculation: u32,
-}
-
-impl Mixer {
-    fn new(
-        cmd_input: mpsc::Receiver<FullMixerCommand>,
-        sample_rate: u32,
-        recalculation_rate: u32,
-        sounds: Vec<Vec<f32>>,
-    ) -> Self {
-        Self {
-            cmd_input,
-            sample_rate,
-            recalculation_rate,
-            sounds,
-            tracks: vec![],
-            until_recalculation: 0,
-        }
-    }
-
-    fn process_events(&mut self) {
-        while let Ok(cmd) = self.cmd_input.try_recv() {
-            let FullMixerCommand { cmd } = cmd;
-            match cmd {
-                MixerCommand::Ting { track_id, side } => self.tracks.push(TrackIndex {
-                    track_id,
-                    cursor: 0,
-                }),
-            }
-        }
+fn smallest_multiple(n: usize, x: usize) -> usize {
+    let rem = n % x as usize;
+    if rem > 0 {
+        n - rem
+    } else {
+        n
     }
 }
 
-impl Iterator for Mixer {
-    type Item = f32;
+fn generate_pure_sound(frequency: usize, sample_rate: usize, duration: f32) -> Vec<f32> {
+    let sample_duration = smallest_multiple(
+        (duration * sample_rate as f32) as usize,
+        sample_rate / frequency,
+    );
+    println!(
+        "{}, {}, {}",
+        (duration * sample_rate as f32) as usize,
+        sample_rate,
+        sample_duration
+    );
+    rodio::source::SineWave::new(frequency as u32)
+        .amplify(0.2)
+        .take(sample_duration)
+        .collect()
+}
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.until_recalculation == 0 {
-            self.process_events();
-            self.until_recalculation = self.recalculation_rate;
-        }
-        self.until_recalculation -= 1;
+fn generate_key(
+    sound: Vec<f32>,
+    sample_rate: usize,
+    wave_length: usize,
+    start_duration: f32,
+    stop_duration: f32,
+) -> mixer::key_state_based::Key {
+    let sample_duration =
+        smallest_multiple((start_duration * sample_rate as f32) as usize, wave_length);
+    let start = sound
+        .iter()
+        .take(sample_duration)
+        .enumerate()
+        .map(|(i, v)| v * i as f32 / sample_duration as f32)
+        .collect();
 
-        let mut ret = 0.0;
-        let mut to_remove = vec![];
-        for (i, track) in self.tracks.iter_mut().enumerate() {
-            let sound = &self.sounds[track.track_id];
-            if track.cursor > 0 {
-                ret += sound[track.cursor as usize];
-            }
-            track.cursor += 1;
-            if track.cursor > 0 && track.cursor as usize == sound.len() {
-                to_remove.push(i);
-            }
-        }
-        if !self.tracks.is_empty() {
-            ret /= self.tracks.len() as f32;
-        }
-        for i in to_remove.into_iter().rev() {
-            self.tracks.remove(i);
-        }
-        Some(ret)
+    let sample_duration =
+        smallest_multiple((stop_duration * sample_rate as f32) as usize, wave_length);
+    let stop = sound
+        .iter()
+        .take(sample_duration)
+        .enumerate()
+        .map(|(i, v)| v * (sample_duration - i) as f32 / sample_duration as f32)
+        .collect();
+
+    mixer::key_state_based::Key {
+        start,
+        maintain: sound,
+        stop,
     }
 }
 
-impl Source for Mixer {
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-    fn channels(&self) -> u16 {
-        1
-    }
-    fn current_frame_len(&self) -> Option<usize> {
-        None
-    }
-    fn total_duration(&self) -> Option<Duration> {
-        None
+#[derive(Debug)]
+enum AnyEvent {
+    Key(KeyEvent),
+    Source,
+}
+
+async fn start_key_watcher(
+    mut input: mpsc::Receiver<KeyEvent>,
+    mut output: mpsc::Sender<AnyEvent>,
+) {
+    while let Some(ev) = input.recv().await {
+        output.send(AnyEvent::Key(ev)).await.unwrap();
     }
 }
 
-const MAX_SAMPLE: usize = 200;
-async fn handle_events(mut input: mpsc::Receiver<KeyEvent>) {
+async fn start_source_watcher(mut input: mpsc::Receiver<()>, mut output: mpsc::Sender<AnyEvent>) {
+    while input.recv().await.is_some() {
+        output.send(AnyEvent::Source).await.unwrap();
+    }
+}
+
+const MAX_FREQ: usize = 1000;
+const MIN_FREQ: usize = 100;
+const MAX_SAMPLE: usize = 5;
+async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
     let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
-    let silence = rodio::source::Zero::<f32>::new(1, 48 * 1024);
 
-    let (mut mix_tx, mix_rx) = mpsc::channel(50);
     let sample_rate = 48 * 1024;
-    let recalculation_rate = 1024;
-    let sounds = (0..MAX_SAMPLE)
+    let frame_size = 1024;
+    let key_duration = KEY_DURATION.as_millis() as f32 / 1000.0;
+    let keys = (0..MAX_SAMPLE)
         .map(|i| {
-            rodio::source::SineWave::new(100 + 10 * i as u32)
-                .take_crossfade_with(silence.clone(), KEY_DURATION)
-                .amplify(0.2)
-                .take(KEY_DURATION.as_millis() as usize * sample_rate / 1000)
-                .collect()
+            let freq = MIN_FREQ + (MAX_FREQ - MIN_FREQ) * i / (MAX_SAMPLE - 1);
+            let sound = generate_pure_sound(freq, sample_rate, key_duration);
+            let start_duration = key_duration / 4.0;
+            let stop_duration = key_duration / 2.0;
+            generate_key(
+                sound,
+                sample_rate,
+                sample_rate / freq,
+                start_duration,
+                stop_duration,
+            )
         })
-        .collect::<Vec<Vec<_>>>();
-    let sounds = [
-        sounds.clone(),
-        sounds
-            .into_iter()
-            .map(|v| v.into_iter().rev().collect())
-            .collect(),
-    ]
-    .concat();
-    let mixer = Mixer::new(mix_rx, sample_rate as u32, recalculation_rate, sounds);
+        .collect::<Vec<_>>();
+
+    let (mut source_tx, source_rx) = mpsc::channel(10);
+    let (frame_done_tx, frame_done_rx) = mpsc::channel(10);
+    let source = source::event_based::Source::new(
+        source_rx,
+        frame_done_tx,
+        sample_rate as u32,
+        vec![0.0f32; frame_size],
+    );
+
+    let (any_tx, mut any_rx) = mpsc::channel(10);
+
+    tokio::spawn(start_key_watcher(input, any_tx.clone()));
+    tokio::spawn(start_source_watcher(frame_done_rx, any_tx));
+
+    let mut mixer = mixer::key_state_based::Mixer::new(keys);
 
     stream_handle
-        .play_raw(mixer.convert_samples())
+        .play_raw(source.convert_samples())
         .expect("play_raw");
 
-    while let Some(event) = input.recv().await {
-        println!("Received event {:?}", event);
-        let track_id = event.code as usize % MAX_SAMPLE;
-        let cmd = match event.value {
-            KeyState::Up => MixerCommand::Ting {
-                track_id,
-                side: Side::Middle,
-            },
-            KeyState::Repeat => MixerCommand::Ting {
-                track_id,
-                side: Side::Middle,
-            },
-            KeyState::Down => MixerCommand::Ting {
-                track_id: track_id + MAX_SAMPLE,
-                side: Side::Middle,
-            },
-            _ => continue,
-        };
-        if let Err(e) = mix_tx.send(FullMixerCommand { cmd }).await {
-            eprintln!("Error: {}", e);
+    while let Some(event) = any_rx.recv().await {
+        match event {
+            AnyEvent::Key(event) => {
+                let key_id = event.code as usize % MAX_SAMPLE;
+                match event.value {
+                    KeyState::Up => mixer
+                        .change_key_state(key_id, mixer::key_state_based::KeyStateChange::Release),
+                    KeyState::Repeat => (),
+                    KeyState::Down => mixer
+                        .change_key_state(key_id, mixer::key_state_based::KeyStateChange::Press),
+                    _ => continue,
+                };
+            }
+            AnyEvent::Source => {
+                let frame = mixer.generate_frame(frame_size);
+                if let Err(e) = source_tx.send(frame).await {
+                    eprintln!("Lost a frame: {}", e);
+                }
+            }
         }
     }
 }

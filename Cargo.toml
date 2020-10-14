@@ -13,4 +13,4 @@ rodio = "0"
 [dependencies.tokio]
 version = "0.2"
 
-features = ["macros", "sync"]
+features = ["macros", "sync", "rt-core"]
