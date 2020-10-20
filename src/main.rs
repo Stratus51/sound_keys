@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 mod mixer;
+mod sound;
 mod source;
 
 const EMPTY_EVENT: input_linux::sys::input_event = input_linux::sys::input_event {
@@ -84,65 +85,6 @@ fn watch_device(device_path: &str, mut output: mpsc::Sender<KeyEvent>) {
 
 const KEY_DURATION: Duration = Duration::from_millis(100);
 
-fn smallest_multiple(n: usize, x: usize) -> usize {
-    let rem = n % x as usize;
-    if rem > 0 {
-        n - rem
-    } else {
-        n
-    }
-}
-
-const TWO_PI: f32 = std::f64::consts::PI as f32 * 2.0;
-fn generate_pure_sound(frequency: usize, sample_rate: usize) -> Vec<f32> {
-    let wave_length = sample_rate / frequency;
-    (0..wave_length)
-        .map(|i| {
-            let progress = i as f32 / wave_length as f32;
-            f32::sin(TWO_PI * progress)
-        })
-        .collect()
-}
-
-fn generate_key(
-    mut sound: Vec<f32>,
-    sample_rate: usize,
-    wave_length: usize,
-    start_duration: f32,
-    stop_duration: f32,
-) -> mixer::key_state_based::Key {
-    sound = sound.into_iter().map(|v| v * 0.02).collect();
-
-    let sample_duration =
-        smallest_multiple((start_duration * sample_rate as f32) as usize, wave_length);
-    let start: Vec<_> = sound
-        .iter()
-        .cycle()
-        .take(sample_duration)
-        .enumerate()
-        .map(|(i, v)| v * i as f32 / sample_duration as f32)
-        .collect();
-
-    let sample_duration =
-        smallest_multiple((stop_duration * (sample_rate as f32)) as usize, wave_length);
-    let stop: Vec<_> = sound
-        .iter()
-        .cycle()
-        .take(sample_duration)
-        .enumerate()
-        .map(|(i, v)| v * ((sample_duration - i - 1) as f32) / (sample_duration as f32))
-        .collect();
-
-    let maintain = sound;
-
-    mixer::key_state_based::Key {
-        start,
-        maintain,
-        stop,
-        frame_size: wave_length,
-    }
-}
-
 #[derive(Debug)]
 enum AnyEvent {
     Key(KeyEvent),
@@ -177,16 +119,13 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
     let keys = (0..NB_FREQ)
         .map(|i| {
             let freq = (MIN_FREQ as f64 * freq_mul.powi(i as i32)) as usize;
-            let sound = generate_pure_sound(freq, sample_rate);
+            let sound: Vec<_> = sound::sinus_sound(freq, sample_rate)
+                .into_iter()
+                .map(|v| v * 0.03)
+                .collect();
             let start_duration = key_duration / 2.0;
             let stop_duration = key_duration;
-            generate_key(
-                sound,
-                sample_rate,
-                sample_rate / freq,
-                start_duration,
-                stop_duration,
-            )
+            sound::key::Key::from_pattern_timed(&sound, sample_rate, start_duration, stop_duration)
         })
         .collect::<Vec<_>>();
 
