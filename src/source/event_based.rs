@@ -2,18 +2,18 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub struct Source {
-    frame_input: mpsc::Receiver<Vec<f32>>,
+    frame_input: mpsc::Receiver<Option<Box<[f32]>>>,
     frame_done: mpsc::Sender<()>,
 
     sample_rate: u32,
     default_frame: Vec<f32>,
-    current_frame: Vec<f32>,
+    current_frame: Box<[f32]>,
     frame_i: usize,
 }
 
 impl Source {
     pub fn new(
-        frame_input: mpsc::Receiver<Vec<f32>>,
+        frame_input: mpsc::Receiver<Option<Box<[f32]>>>,
         frame_done: mpsc::Sender<()>,
         sample_rate: u32,
         default_frame: Vec<f32>,
@@ -23,7 +23,7 @@ impl Source {
             frame_done,
 
             sample_rate,
-            current_frame: default_frame.clone(),
+            current_frame: default_frame.clone().into_boxed_slice(),
             default_frame,
             frame_i: 0,
         }
@@ -38,8 +38,13 @@ impl Iterator for Source {
             // Ignore errors. We don't care if the queue is full.
             drop(self.frame_done.try_send(()));
             self.current_frame = match self.frame_input.try_recv() {
-                Ok(frame) => frame,
-                Err(_) => self.default_frame.clone(),
+                Ok(opt) => match opt {
+                    Some(frame) => frame,
+                    // TODO Optimize
+                    None => self.default_frame.clone().into_boxed_slice(),
+                },
+                // TODO Optimize
+                Err(_) => self.default_frame.clone().into_boxed_slice(),
             };
             self.frame_i = 0;
         }
