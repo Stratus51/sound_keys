@@ -82,7 +82,7 @@ fn watch_device(device_path: &str, mut output: mpsc::Sender<KeyEvent>) {
     });
 }
 
-const KEY_DURATION: Duration = Duration::from_millis(500);
+const KEY_DURATION: Duration = Duration::from_millis(100);
 
 fn smallest_multiple(n: usize, x: usize) -> usize {
     let rem = n % x as usize;
@@ -93,52 +93,53 @@ fn smallest_multiple(n: usize, x: usize) -> usize {
     }
 }
 
-fn generate_pure_sound(frequency: usize, sample_rate: usize, duration: f32) -> Vec<f32> {
-    let sample_duration = smallest_multiple(
-        (duration * sample_rate as f32) as usize,
-        sample_rate / frequency,
-    );
-    println!(
-        "{}, {}, {}",
-        (duration * sample_rate as f32) as usize,
-        sample_rate,
-        sample_duration
-    );
-    rodio::source::SineWave::new(frequency as u32)
-        .amplify(0.2)
-        .take(sample_duration)
+const TWO_PI: f32 = std::f64::consts::PI as f32 * 2.0;
+fn generate_pure_sound(frequency: usize, sample_rate: usize) -> Vec<f32> {
+    let wave_length = sample_rate / frequency;
+    (0..wave_length)
+        .map(|i| {
+            let progress = i as f32 / wave_length as f32;
+            f32::sin(TWO_PI * progress)
+        })
         .collect()
 }
 
 fn generate_key(
-    sound: Vec<f32>,
+    mut sound: Vec<f32>,
     sample_rate: usize,
     wave_length: usize,
     start_duration: f32,
     stop_duration: f32,
 ) -> mixer::key_state_based::Key {
+    sound = sound.into_iter().map(|v| v * 0.02).collect();
+
     let sample_duration =
         smallest_multiple((start_duration * sample_rate as f32) as usize, wave_length);
-    let start = sound
+    let start: Vec<_> = sound
         .iter()
+        .cycle()
         .take(sample_duration)
         .enumerate()
         .map(|(i, v)| v * i as f32 / sample_duration as f32)
         .collect();
 
     let sample_duration =
-        smallest_multiple((stop_duration * sample_rate as f32) as usize, wave_length);
-    let stop = sound
+        smallest_multiple((stop_duration * (sample_rate as f32)) as usize, wave_length);
+    let stop: Vec<_> = sound
         .iter()
+        .cycle()
         .take(sample_duration)
         .enumerate()
-        .map(|(i, v)| v * (sample_duration - i) as f32 / sample_duration as f32)
+        .map(|(i, v)| v * ((sample_duration - i - 1) as f32) / (sample_duration as f32))
         .collect();
+
+    let maintain = sound;
 
     mixer::key_state_based::Key {
         start,
-        maintain: sound,
+        maintain,
         stop,
+        frame_size: wave_length,
     }
 }
 
@@ -177,8 +178,8 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
         .map(|i| {
             let freq = (MIN_FREQ as f64 * freq_mul.powi(i as i32)) as usize;
             let sound = generate_pure_sound(freq, sample_rate);
-            let start_duration = key_duration / 4.0;
-            let stop_duration = key_duration / 2.0;
+            let start_duration = key_duration / 2.0;
+            let stop_duration = key_duration;
             generate_key(
                 sound,
                 sample_rate,
@@ -209,10 +210,12 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
         .play_raw(source.convert_samples())
         .expect("play_raw");
 
+    source_tx.send(vec![0.0; frame_size]).await.unwrap();
+    source_tx.send(vec![0.0; frame_size]).await.unwrap();
     while let Some(event) = any_rx.recv().await {
         match event {
             AnyEvent::Key(event) => {
-                let key_id = event.code as usize % MAX_SAMPLE;
+                let key_id = event.code as usize % NB_FREQ;
                 match event.value {
                     KeyState::Up => mixer
                         .change_key_state(key_id, mixer::key_state_based::KeyStateChange::Release),
