@@ -4,8 +4,10 @@ pub struct Key {
     pub start: Vec<f32>,
     pub maintain: Vec<f32>,
     pub stop: Vec<f32>,
+    pub frame_size: usize,
 }
 
+#[derive(Clone)]
 pub enum KeyState {
     Starting,
     Maintaining,
@@ -14,14 +16,6 @@ pub enum KeyState {
 }
 
 impl KeyState {
-    fn next_state(&self) -> Self {
-        match self {
-            KeyState::Starting => KeyState::Maintaining,
-            KeyState::Maintaining => KeyState::Maintaining,
-            KeyState::Stopping => KeyState::Stopped,
-            KeyState::Stopped => panic!("No state after stopped."),
-        }
-    }
     fn is_stopped(&self) -> bool {
         if let KeyState::Stopped = self {
             true
@@ -34,6 +28,7 @@ impl KeyState {
 pub struct MixerKey {
     key: Key,
     state: KeyState,
+    next_state: Option<KeyState>,
     cursor: usize,
 }
 
@@ -42,13 +37,18 @@ impl MixerKey {
         Self {
             key,
             state: KeyState::Stopped,
+            next_state: None,
             cursor: 0,
         }
     }
 
     fn restart(&mut self) {
-        self.state = KeyState::Starting;
-        self.cursor = 0;
+        if let KeyState::Stopped = self.state {
+            self.cursor = 0;
+            self.state = KeyState::Starting;
+        } else {
+            self.next_state = Some(KeyState::Starting);
+        }
     }
 
     fn force_stop(&mut self) {
@@ -58,27 +58,48 @@ impl MixerKey {
     fn stop(&mut self) {
         match self.state {
             KeyState::Stopping | KeyState::Stopped => (),
-            _ => {
-                self.state = KeyState::Stopping;
-                self.cursor = 0;
-            }
+            _ => self.next_state = Some(KeyState::Stopping),
+        }
+    }
+
+    fn next_state(&self) -> KeyState {
+        match self.state {
+            KeyState::Starting => KeyState::Maintaining,
+            KeyState::Maintaining => KeyState::Maintaining,
+            KeyState::Stopping => KeyState::Stopped,
+            KeyState::Stopped => panic!("No state after stopped."),
         }
     }
 
     fn take_value(&mut self) -> f32 {
-        let MixerKey { key, state, cursor } = self;
-        let data = match &state {
-            KeyState::Starting => &key.start,
-            KeyState::Maintaining => &key.maintain,
-            KeyState::Stopping => &key.stop,
-            KeyState::Stopped => panic!("Key should not be played after being stopped!"),
-        };
+        let (ret, len) = {
+            let MixerKey {
+                key,
+                state,
+                next_state: _,
+                cursor,
+            } = self;
+            let data = match &state {
+                KeyState::Starting => &key.start,
+                KeyState::Maintaining => &key.maintain,
+                KeyState::Stopping => &key.stop,
+                KeyState::Stopped => panic!("Key should not be played after being stopped!"),
+            };
 
-        let ret = data[*cursor];
-        *cursor += 1;
-        if *cursor == data.len() {
-            *state = state.next_state();
-            *cursor = 0;
+            let ret = data[*cursor];
+            *cursor += 1;
+            (ret, data.len())
+        };
+        if self.cursor % self.key.frame_size == 0 {
+            if let Some(state) = &self.next_state {
+                self.state = state.clone();
+                self.cursor = 0;
+                self.next_state = None;
+            }
+        }
+        if self.cursor == len {
+            self.state = self.next_state();
+            self.cursor = 0;
         }
         ret
     }
