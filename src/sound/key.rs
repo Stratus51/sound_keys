@@ -34,7 +34,7 @@ impl Key {
             .map(|(i, v)| v * ((sample_duration - i - 1) as f32) / (sample_duration as f32))
             .collect();
 
-        let maintain = pattern.iter().cloned().collect();
+        let maintain = pattern.to_vec();
 
         Key {
             start,

@@ -83,8 +83,6 @@ fn watch_device(device_path: &str, mut output: mpsc::Sender<KeyEvent>) {
     });
 }
 
-const KEY_DURATION: Duration = Duration::from_millis(100);
-
 #[derive(Debug)]
 enum AnyEvent {
     Key(KeyEvent),
@@ -113,8 +111,7 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
     let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
 
     let sample_rate = 48 * 1024;
-    let frame_size = 1024;
-    let key_duration = KEY_DURATION.as_millis() as f32 / 1000.0;
+    let frame_size = 512;
     let freq_mul = f64::exp(f64::ln(MAX_FREQ as f64 / MIN_FREQ as f64) / (NB_FREQ as f64 - 1.0));
     let keys = (0..NB_FREQ)
         .map(|i| {
@@ -123,9 +120,7 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
                 .into_iter()
                 .map(|v| v * 0.03)
                 .collect();
-            let start_duration = key_duration / 2.0;
-            let stop_duration = key_duration;
-            sound::key::Key::from_pattern_timed(&sound, sample_rate, start_duration, stop_duration)
+            sound::key::Key::from_pattern_timed(&sound, sample_rate, 0.01, 0.20)
         })
         .collect::<Vec<_>>();
 
@@ -143,29 +138,32 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
     tokio::spawn(start_key_watcher(input, any_tx.clone()));
     tokio::spawn(start_source_watcher(frame_done_rx, any_tx));
 
-    let mut mixer = mixer::key_state_based::Mixer::new(keys);
+    let sound_lib = keys
+        .iter()
+        .map(|key| key.to_sound().into_boxed_slice())
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let mut mixer = mixer::sound_event_based::Mixer::new(sound_lib, frame_size);
 
     stream_handle
         .play_raw(source.convert_samples())
         .expect("play_raw");
 
-    source_tx.send(vec![0.0; frame_size]).await.unwrap();
-    source_tx.send(vec![0.0; frame_size]).await.unwrap();
     while let Some(event) = any_rx.recv().await {
         match event {
             AnyEvent::Key(event) => {
                 let key_id = event.code as usize % NB_FREQ;
                 match event.value {
-                    KeyState::Up => mixer
-                        .change_key_state(key_id, mixer::key_state_based::KeyStateChange::Release),
+                    KeyState::Up => (),
                     KeyState::Repeat => (),
-                    KeyState::Down => mixer
-                        .change_key_state(key_id, mixer::key_state_based::KeyStateChange::Press),
+                    KeyState::Down => {
+                        mixer.push_event(mixer::sound_event_based::SoundEvent::Known(key_id))
+                    }
                     _ => continue,
                 };
             }
             AnyEvent::Source => {
-                let frame = mixer.generate_frame(frame_size);
+                let frame = mixer.generate_frame();
                 if let Err(e) = source_tx.send(frame).await {
                     eprintln!("Lost a frame: {}", e);
                 }
