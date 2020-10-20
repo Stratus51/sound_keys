@@ -165,17 +165,18 @@ async fn start_source_watcher(mut input: mpsc::Receiver<()>, mut output: mpsc::S
 
 const MAX_FREQ: usize = 1000;
 const MIN_FREQ: usize = 100;
-const MAX_SAMPLE: usize = 5;
+const NB_FREQ: usize = 200;
 async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
     let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
 
     let sample_rate = 48 * 1024;
     let frame_size = 1024;
     let key_duration = KEY_DURATION.as_millis() as f32 / 1000.0;
-    let keys = (0..MAX_SAMPLE)
+    let freq_mul = f64::exp(f64::ln(MAX_FREQ as f64 / MIN_FREQ as f64) / (NB_FREQ as f64 - 1.0));
+    let keys = (0..NB_FREQ)
         .map(|i| {
-            let freq = MIN_FREQ + (MAX_FREQ - MIN_FREQ) * i / (MAX_SAMPLE - 1);
-            let sound = generate_pure_sound(freq, sample_rate, key_duration);
+            let freq = (MIN_FREQ as f64 * freq_mul.powi(i as i32)) as usize;
+            let sound = generate_pure_sound(freq, sample_rate);
             let start_duration = key_duration / 4.0;
             let stop_duration = key_duration / 2.0;
             generate_key(
