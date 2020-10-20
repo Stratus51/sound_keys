@@ -1,11 +1,5 @@
+use crate::sound::key::Key;
 use std::collections::HashSet;
-
-pub struct Key {
-    pub start: Vec<f32>,
-    pub maintain: Vec<f32>,
-    pub stop: Vec<f32>,
-    pub frame_size: usize,
-}
 
 #[derive(Clone)]
 pub enum KeyState {
