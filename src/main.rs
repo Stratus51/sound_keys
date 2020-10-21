@@ -172,7 +172,7 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     // Arguments parsing
     let paths: Vec<_> = std::env::args().skip(1).collect();
