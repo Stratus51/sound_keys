@@ -107,7 +107,7 @@ fn build_sound_library(sample_rate: usize) -> Box<[Box<[f32]>]> {
     let keys = (0..NB_FREQ)
         .map(|i| {
             let freq = (MIN_FREQ as f64 * freq_mul.powi(i as i32)) as usize;
-            let sound: Vec<_> = sound::sinus_sound(freq, sample_rate)
+            let sound: Vec<_> = sound::triangle_sound(freq, sample_rate)
                 .into_iter()
                 .map(|v| v * 0.03)
                 .collect();
