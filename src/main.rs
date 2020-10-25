@@ -49,7 +49,7 @@ struct KeyEvent {
 
 const EV_KEY: u16 = input_linux::sys::EV_KEY as u16;
 
-fn watch_device(device_path: &str, mut output: mpsc::Sender<KeyEvent>) {
+fn watch_device(device_path: &str, output: mpsc::Sender<KeyEvent>) {
     let device_path = device_path.to_string();
     std::thread::spawn(move || {
         println!("Opening file {}", device_path);
@@ -89,29 +89,20 @@ enum AnyEvent {
     Source,
 }
 
-async fn start_key_watcher(
-    mut input: mpsc::Receiver<KeyEvent>,
-    mut output: mpsc::Sender<AnyEvent>,
-) {
+async fn start_key_watcher(mut input: mpsc::Receiver<KeyEvent>, output: mpsc::Sender<AnyEvent>) {
     while let Some(ev) = input.recv().await {
         output.send(AnyEvent::Key(ev)).await.unwrap();
     }
 }
 
-async fn start_source_watcher(mut input: mpsc::Receiver<()>, mut output: mpsc::Sender<AnyEvent>) {
+async fn start_source_watcher(mut input: mpsc::Receiver<()>, output: mpsc::Sender<AnyEvent>) {
     while input.recv().await.is_some() {
         output.send(AnyEvent::Source).await.unwrap();
     }
 }
 
-const MAX_FREQ: usize = 1000;
-const MIN_FREQ: usize = 100;
-const NB_FREQ: usize = 200;
-async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
-    let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
-
-    let sample_rate = 48 * 1024;
-    let frame_size = 512;
+const SAMPLE_RATE: usize = 48 * 1024;
+fn build_sound_library(sample_rate: usize) -> Box<[Box<[f32]>]> {
     let freq_mul = f64::exp(f64::ln(MAX_FREQ as f64 / MIN_FREQ as f64) / (NB_FREQ as f64 - 1.0));
     let keys = (0..NB_FREQ)
         .map(|i| {
@@ -123,8 +114,25 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
             sound::key::Key::from_pattern_timed(&sound, sample_rate, 0.01, 0.20)
         })
         .collect::<Vec<_>>();
+    keys.iter()
+        .map(|key| key.to_sound().into_boxed_slice())
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+}
 
-    let (mut source_tx, source_rx) = mpsc::channel(10);
+const MAX_FREQ: usize = 1000;
+const MIN_FREQ: usize = 100;
+const NB_FREQ: usize = 200;
+async fn handle_events(
+    input: mpsc::Receiver<KeyEvent>,
+    sample_rate: usize,
+    sound_lib: Box<[Box<[f32]>]>,
+) {
+    let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
+
+    let frame_size = 512;
+
+    let (source_tx, source_rx) = mpsc::channel(10);
     let (frame_done_tx, frame_done_rx) = mpsc::channel(10);
     let source = source::event_based::Source::new(
         source_rx,
@@ -138,11 +146,6 @@ async fn handle_events(input: mpsc::Receiver<KeyEvent>) {
     tokio::spawn(start_key_watcher(input, any_tx.clone()));
     tokio::spawn(start_source_watcher(frame_done_rx, any_tx));
 
-    let sound_lib = keys
-        .iter()
-        .map(|key| key.to_sound().into_boxed_slice())
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
     let mut mixer = mixer::sound_event_based::Mixer::new(sound_lib, frame_size);
 
     stream_handle
@@ -194,5 +197,8 @@ async fn main() {
     }
 
     // Process events
-    handle_events(event_rx).await
+    println!("Building sound library");
+    let sound_lib = build_sound_library(SAMPLE_RATE);
+    println!("Ready.");
+    handle_events(event_rx, SAMPLE_RATE, sound_lib).await
 }
