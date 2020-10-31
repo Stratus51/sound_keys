@@ -93,12 +93,21 @@ async fn start_key_watcher(mut input: mpsc::Receiver<KeyEvent>, output: mpsc::Se
     while let Some(ev) = input.recv().await {
         output.send(AnyEvent::Key(ev)).await.unwrap();
     }
+    println!("Stop watching keys");
 }
 
 async fn start_source_watcher(mut input: mpsc::Receiver<()>, output: mpsc::Sender<AnyEvent>) {
     while input.recv().await.is_some() {
         output.send(AnyEvent::Source).await.unwrap();
     }
+    println!("Stop watching source events");
+}
+
+fn loudness_compensation(freq: usize) -> f32 {
+    let freq_log = f32::log10(freq as f32);
+    let min = f32::log10(20.0);
+    let max = f32::log10(10000.0);
+    3.0 * (freq_log / (max - min) + min)
 }
 
 const SAMPLE_RATE: usize = 48 * 1024;
@@ -109,7 +118,7 @@ fn build_sound_library(sample_rate: usize) -> Box<[Box<[f32]>]> {
             let freq = (MIN_FREQ as f64 * freq_mul.powi(i as i32)) as usize;
             let sound: Vec<_> = sound::triangle_sound(freq, sample_rate)
                 .into_iter()
-                .map(|v| v * 0.03)
+                .map(|v| v * 0.02 * loudness_compensation(freq))
                 .collect();
             sound::key::Key::from_pattern_timed(&sound, sample_rate, 0.01, 0.20)
         })
